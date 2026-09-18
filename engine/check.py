@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""产物自检：跑完 build.py 后执行，验证关键文件与不变量。
+
+python tools/check.py
+"""
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import config  # noqa: E402
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
+ROOT = config.SITE
+DIST = config.OUT
+fails = []
+
+
+def need(cond, msg):
+    if not cond:
+        fails.append(msg)
+
+
+need(DIST.exists(), "dist/ 不存在，先跑 tools/build.py")
+if not DIST.exists():
+    print("\n".join(fails))
+    sys.exit(1)
+
+for f in ("index.html", "app.js", "style.css", "manifest.json", "search-index.json",
+          "sitemap.xml", "feed.xml", "map.svg", "llms.txt", "llms-full.txt"):
+    need((DIST / f).exists(), "缺少产物 %s" % f)
+
+man = (DIST / "manifest.json").read_text(encoding="utf-8")
+m = json.loads(man)
+need(m["site"]["title"], "site.title 为空")
+need(m["site"]["url"].startswith("http"), "site.url 非法")
+need(m["site"].get("domains"), "site.domains 为空（多域名应配置）")
+need(m["site"]["group"].get("join_url"), "site.group.join_url 为空（「加入我们」按钮需要）")
+need(m["site"]["nav"], "site.nav 为空（左栏导航需要）")
+
+idx = (DIST / "index.html").read_text(encoding="utf-8")
+need("<!--BUILD:HEAD-->" not in idx, "index.html 里的 <!--BUILD:HEAD--> 占位没被替换")
+need('rel="icon"' in idx, "index.html 缺少 favicon（群 logo）链接")
+need(m["site"]["avatar"], "site.avatar 为空（群 logo / favicon 来源）")
+if m["site"]["avatar"]:
+    need((DIST / "favicon.jpg").exists() or (DIST / "favicon.png").exists()
+         or (DIST / m["site"]["avatar"]).exists(), "favicon 文件缺失")
+need((DIST / "site.webmanifest").exists(), "缺少 site.webmanifest")
+
+for p in m["posts"]:
+    need(p["tags"], "文章 %s 没有标签" % p["slug"])
+    need((DIST / p["html"]).exists(), "文章片段缺失 %s" % p["html"])
+    need((DIST / p["map"]).exists(), "文章导图缺失 %s" % p["map"])
+    body = (DIST / p["html"]).read_text(encoding="utf-8")
+    need(len(body) > 20, "文章片段过短 %s" % p["slug"])
+    need(not re.search(r"\{(ref|term|math|em|strong|link):", body), "文章 %s 有未解析的内联角色" % p["slug"])
+    need("<script" not in body.lower(), "文章 %s 片段里出现了 script（投稿内容不应带脚本）" % p["slug"])
+    need(not re.search(r"<p>[^<]*(^|\n)\s*#{1,6}\s", body), "文章 %s 疑似有未渲染的 Markdown 标题" % p["slug"])
+    need(not re.search(r"<p>[^<]*\*\*", body), "文章 %s 疑似有未渲染的 Markdown 粗体" % p["slug"])
+    for toc in p["toc"]:
+        need(('id="%s"' % toc["id"]) in body, "文章 %s 的章节锚点缺失：%s" % (p["slug"], toc["id"]))
+
+svg = (DIST / "map.svg").read_text(encoding="utf-8")
+need(svg.startswith("<svg"), "map.svg 头部异常")
+need(svg.count("<a class=") >= 5, "map.svg 可点击节点过少")
+
+for p in m["pages"]:
+    need(p.get("group"), "文档页 %s 缺少 group（文档树按 group 分组）" % p["id"])
+    need(p.get("order") is not None, "文档页 %s 缺少 order（决定同级顺序）" % p["id"])
+
+for mem in m["members"]:
+    src = (ROOT / mem["file"]).read_text(encoding="utf-8")
+    if "&" in src and not mem["links"]:
+        fails.append("成员 %s 的 links 为空：片段（&引用）可能没展开" % mem["id"])
+
+for d in m["pages"] + m["weekly"]:
+    need((DIST / d["html"]).exists(), "片段缺失 %s" % d["html"])
+    need((DIST / d["map"]).exists(), "导图缺失 %s" % d["map"])
+
+need(not re.search(r">\s*(None|null|True|False)\s*<", man), "manifest 里疑似出现裸 Python 值")
+need("__type" not in man, "manifest 里泄漏了解析器内部字段 __type（片段展开未清理）")
+need("__is" not in man and "__contracts" not in man and "__md_body" not in man,
+     "manifest 里泄漏了解析器内部字段（__is / __contracts / __md_body）")
+
+contracts_page = [p for p in m["pages"] if p["id"] == "contracts"]
+need(contracts_page, "缺少自动生成的契约文档页（content/contracts/*.sml 是否为空？）")
+if contracts_page:
+    need((DIST / contracts_page[0]["html"]).exists(), "契约文档页片段缺失")
+    need((DIST / contracts_page[0]["map"]).exists(), "契约文档页导图缺失")
+    body = (DIST / contracts_page[0]["html"]).read_text(encoding="utf-8")
+    need(body.count("<table>") >= 1, "契约文档页没有表格")
+    need("E-CONTRACT" not in body, "契约文档页里出现了错误码字样（说明契约本身有问题）")
+
+print("文章 %d / 项目 %d / 成员 %d / 资源 %d / 周报 %d / 文档 %d"
+      % (len(m["posts"]), len(m["projects"]), len(m["members"]),
+         len(m["resources"]), len(m["weekly"]), len(m["pages"])))
+if fails:
+    print("失败 %d 项：" % len(fails))
+    for f in fails:
+        print("  - %s" % f)
+    sys.exit(1)
+print("ALL PASS")

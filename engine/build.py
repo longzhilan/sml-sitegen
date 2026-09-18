@@ -1,0 +1,925 @@
+#!/usr/bin/env python3
+"""rec-blog 构建器：.sml → manifest.json + 预渲染 HTML 片段 + 静态站点产物。
+
+用法：
+    python tools/build.py              # 完整构建
+    python tools/build.py --offline    # 不联网，只用仓库元数据缓存
+    python tools/build.py --warn-only  # 校验问题只告警，不中断构建
+"""
+
+import argparse
+import json
+import re
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import config
+import sml
+import render
+import markdown as md
+import repo_meta
+import mindmap
+import contract as contract_mod
+
+try:  # 中文输出统一走 UTF-8，避免被控制台代码页搞成乱码
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
+DOC_EXT = (".sml", ".md", ".markdown")
+
+ROOT = config.SITE                   # 站点根（内容 + 主题 + 元数据缓存）
+CONTENT = config.CONTENT             # 人写的内容都在这
+THEME = config.THEME                 # 前端壳（静态资源）
+OUT = config.OUT                     # 构建产物（仓库根 dist/）
+CACHE = config.CACHE                 # 仓库元数据缓存
+
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+MAX_IMAGE = 2 * 1024 * 1024
+MAX_IMAGES_PER_POST = 20
+
+REQ = {
+    "post": ["title", "author", "date", "tags", "summary"],
+    "project": ["name", "one_liner", "repo", "status"],
+    "member": ["name"],
+    "resource": ["title", "kind", "url"],
+    "weekly": ["period", "title"],
+    "doc": ["title"],
+    "site": ["title"],
+}
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def clean_out(out):
+    """清空产物目录。不用 shutil.rmtree：某些环境会拦截它做「安全删除」，
+    且预览服务可能持有文件句柄；逐项删除并容忍失败（后续写入会覆盖）。"""
+    if not out.exists():
+        out.mkdir(parents=True)
+        return
+    for p in sorted(out.rglob("*"), key=lambda x: len(str(x)), reverse=True):
+        try:
+            if p.is_file() or p.is_symlink():
+                p.unlink()
+            elif p.is_dir():
+                p.rmdir()
+        except OSError:
+            pass
+
+
+def esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+class Report:
+    def __init__(self):
+        self.errors = []
+        self.warnings = []
+
+    def err(self, where, msg):
+        self.errors.append("%s: %s" % (where, msg))
+
+    def warn(self, where, msg):
+        self.warnings.append("%s: %s" % (where, msg))
+
+
+def check_req(rep, kind, where, data):
+    for k in REQ.get(kind, []):
+        if data.get(k) in (None, "", []):
+            rep.err(where, "缺少必填字段 `%s`" % k)
+
+
+def load(path):
+    """按扩展名分发：.sml 走 SML 解析器，.md/.markdown 取 front matter（正文放 __md_body）。"""
+    if path.suffix.lower() in (".md", ".markdown"):
+        meta, body = md.split_front_matter(path.read_text(encoding="utf-8"))
+        meta["__md_body"] = body
+        return meta
+    return sml.load(path)
+
+
+SKIP_NAMES = {"readme", "architecture", "changelog", "license", "contributing", "handoff", "todo"}
+
+
+GLOBAL_CONTRACTS = {}
+CONTRACT_DEFAULTS = {}
+CONTRACT_LOOSE = False
+
+
+def load2(f):
+    """读内容文件：返回 (数据, 文件内契约表)。"""
+    if f.suffix.lower() in (".md", ".markdown"):
+        meta, body = md.split_front_matter(f.read_text(encoding="utf-8"))
+        meta["__md_body"] = body
+        return meta, {}
+    return sml.load_doc(f)
+
+
+def register_contracts(rep, where, cs):
+    for name, spec in (cs or {}).items():
+        if name in GLOBAL_CONTRACTS:
+            rep.warn(where, "契约 `%s` 重复定义，以先定义的为准" % name)
+            continue
+        GLOBAL_CONTRACTS[name] = spec
+
+
+def apply_contract(rep, where, d, kind):
+    """按文件里的 @is 或 site.sml 的默认映射校验字段，报错带错误码 + 人话。
+    返回是否真正套用了契约（套用了就不再跑内置必填校验，免得同一问题报两遍）。"""
+    cname = d.get("__is") or CONTRACT_DEFAULTS.get(kind)
+    if not cname:
+        return False
+    if cname not in GLOBAL_CONTRACTS:
+        rep.err(where, "E-CONTRACT-001 未定义的契约 `%s`（已定义：%s）"
+                % (cname, ", ".join(sorted(GLOBAL_CONTRACTS)) or "无"))
+        return True
+    for code, text in contract_mod.validate(d, cname, GLOBAL_CONTRACTS, loose=CONTRACT_LOOSE):
+        rep.err(where, "%s %s" % (code, text))
+    return True
+
+
+def docs_in(directory, pattern="*"):
+    """列出内容文件（可按扩展名区分 SML/Markdown），跳过项目自身文档（README 等）与下划线开头。"""
+    if not directory.exists():
+        return []
+    out = []
+    for p in sorted(directory.glob(pattern)):
+        if not p.is_file() or p.suffix.lower() not in DOC_EXT:
+            continue
+        if p.name.startswith("_") or p.stem.lower() in SKIP_NAMES:
+            continue
+        out.append(p)
+    return out
+
+
+def render_body(d, ctx, level=1):
+    """SML body / Markdown body 统一出口，返回 (html, toc)。"""
+    body = d.get("__md_body")
+    if body is not None:
+        return md.render(body, ctx, level)
+    html = render.render(pick(d, ["body", "children"], []), ctx, level)
+    return html, ctx.toc
+
+
+def as_list(v):
+    return sml.as_list(v)
+
+
+def pick(d, keys, default=None):
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, "", []):
+            return v
+    return default
+
+
+def build_posts(rep, cache, offline):
+    posts = []
+    for f in docs_in(CONTENT / "posts", "*/*/index.*"):
+        rel = f.relative_to(ROOT).as_posix()
+        d, cs = load2(f)
+        where = rel
+        register_contracts(rep, where, cs)
+        checked = apply_contract(rep, where, d, "post")
+        slug = f.parent.name
+        year = f.parent.parent.name
+        if d.get("draft") is True:
+            print("  - 跳过草稿 %s" % slug)
+            continue
+        if not checked:
+            check_req(rep, "post", where, d)
+        author = sml.as_str(d.get("author")).strip()
+        date = sml.as_str(d.get("date")).strip()
+        ctx = render.Ctx()
+        video_html = render.video_embed(sml.as_str(d.get("video", "")))
+        html_body, toc = render_body(d, ctx, 1)
+        if video_html:
+            html_body = video_html + html_body
+        for m in re.finditer(r'src="(assets/[^"]+)"', html_body):
+            if not (f.parent / m.group(1)).exists():
+                rep.err(where, "正文引用的本地图片不存在：%s" % m.group(1))
+        html_body = html_body.replace('src="assets/', 'src="assets/posts/%s/' % slug)
+        text = render.strip_html(html_body)
+
+        toc_nodes = [dict(x, anchor="#/post/%s/%s" % (slug, x["id"])) for x in toc]
+        map_svg = mindmap.to_svg(mindmap.from_toc(sml.as_str(d.get("title")), toc_nodes),
+                                 sml.as_str(d.get("title")))
+
+        atts = []
+        for a in as_list(d.get("attachments")):
+            if not isinstance(a, dict):
+                rep.warn(where, "附件项不是块，已忽略")
+                continue
+            name = sml.as_str(pick(a, ["name", "title"], ""))
+            url = sml.as_str(pick(a, ["url", "href", "src"], ""))
+            kind = sml.as_str(pick(a, ["kind", "type"], "link")).lower()
+            size = sml.as_str(a.get("size", ""))
+            if kind in ("image", "img", "png", "jpg", "jpeg", "webp", "gif", "svg"):
+                kind = "image"
+            if not name or not url:
+                rep.err(where, "附件缺少 name 或 url")
+                continue
+            if kind == "image":
+                p = f.parent / url
+                if not p.exists():
+                    rep.err(where, "附件图片不存在：%s" % url)
+                    continue
+                if p.suffix.lower() not in IMAGE_EXT:
+                    rep.err(where, "附件图片类型不允许：%s" % p.suffix)
+                    continue
+                if p.stat().st_size > MAX_IMAGE:
+                    rep.err(where, "附件图片超过 %d MB：%s" % (MAX_IMAGE // 1024 // 1024, url))
+                    continue
+                size = size or "%.0f KB" % (p.stat().st_size / 1024)
+                url = "assets/posts/%s/%s" % (slug, url)
+            else:
+                if not url.startswith(("http://", "https://")):
+                    rep.err(where, "非图片附件必须是 http(s) 外链：%s" % url)
+                    continue
+            atts.append({"name": name, "kind": kind, "url": url, "size": size})
+
+        imgs = 0
+        for p in sorted((f.parent / "assets").glob("*")) if (f.parent / "assets").exists() else []:
+            if p.suffix.lower() in IMAGE_EXT:
+                imgs += 1
+                if p.stat().st_size > MAX_IMAGE:
+                    rep.err(where, "assets/ 内图片超过 %d MB：%s" % (MAX_IMAGE // 1024 // 1024, p.name))
+        if imgs > MAX_IMAGES_PER_POST:
+            rep.err(where, "assets/ 图片数量超过 %d" % MAX_IMAGES_PER_POST)
+
+        series = d.get("series")
+        series_id = None
+        series_title = ""
+        order = None
+        if isinstance(series, dict):
+            series_id = sml.as_str(series.get("id")) or None
+            series_title = sml.as_str(series.get("title", ""))
+            order = series.get("order")
+        elif isinstance(series, str):
+            series_id = series
+
+        posts.append({
+            "slug": slug,
+            "year": year,
+            "title": sml.as_str(d.get("title")),
+            "author": author,
+            "co_authors": [sml.as_str(x) for x in as_list(d.get("co_authors"))],
+            "date": date,
+            "updated": sml.as_str(pick(d, ["updated"], date)),
+            "tags": [sml.as_str(x) for x in as_list(d.get("tags"))],
+            "summary": sml.as_str(d.get("summary")),
+            "license": sml.as_str(pick(d, ["license"], "")),
+            "series": series_id,
+            "series_title": series_title,
+            "order": order,
+            "video": sml.as_str(d.get("video", "")),
+            "attachments": atts,
+            "toc": toc,
+            "words": len(text),
+            "file": rel,
+            "html": "p/%s.html" % slug,
+            "map": "p/%s.map.svg" % slug,
+            "_html": html_body,
+            "_text": text,
+            "_map": map_svg,
+        })
+    posts.sort(key=lambda p: (p["date"], p["slug"]), reverse=True)
+    return posts
+
+
+def build_projects(rep, cache, offline):
+    out = []
+    for f in docs_in(CONTENT / "projects"):
+        d, cs = load2(f)
+        where = f.relative_to(ROOT).as_posix()
+        register_contracts(rep, where, cs)
+        if not apply_contract(rep, where, d, "project"):
+            check_req(rep, "project", where, d)
+        pid = f.stem
+        repo_url = sml.as_str(d.get("repo"))
+        item = {
+            "id": pid,
+            "name": sml.as_str(d.get("name")),
+            "one_liner": sml.as_str(d.get("one_liner")),
+            "repo": repo_url,
+            "homepage": sml.as_str(d.get("homepage", "")),
+            "languages": [sml.as_str(x) for x in as_list(d.get("languages"))],
+            "platforms": [sml.as_str(x) for x in as_list(d.get("platforms"))],
+            "status": sml.as_str(d.get("status")),
+            "license": sml.as_str(d.get("license", "")),
+            "owner": sml.as_str(d.get("owner", "")),
+            "contributors": [sml.as_str(x) for x in as_list(d.get("contributors"))],
+            "featured": d.get("featured") is True,
+            "meta": None,
+        }
+        source = sml.as_str(d.get("meta_source", "auto")).lower()
+        override = d.get("meta_override") if isinstance(d.get("meta_override"), dict) else {}
+        if source != "manual" and repo_url:
+            item["meta"] = cache.get(repo_url, offline=offline)
+        if item["meta"] and override:
+            item["meta"].update({k: sml.as_str(v) for k, v in override.items()})
+        elif override:
+            item["meta"] = dict(item["meta"] or {}, **{k: sml.as_str(v) for k, v in override.items()})
+        out.append(item)
+    out.sort(key=lambda p: (not p["featured"], p["name"]))
+    return out
+
+
+AVATAR_EXT = (".jpg", ".jpeg", ".png", ".webp")
+
+
+def find_avatar(mid):
+    """没写 avatar 字段时的自动发现：content/members/<id>.* → content/avatars/<id>.* → 站点根 <id>.*"""
+    for d in (CONTENT / "members", CONTENT / "avatars", ROOT):
+        for ext in AVATAR_EXT:
+            p = d / (mid + ext)
+            if p.exists():
+                return p
+    return None
+
+
+def build_members(rep):
+    out = []
+    for f in docs_in(CONTENT / "members"):
+        d, cs = load2(f)
+        where = f.relative_to(ROOT).as_posix()
+        register_contracts(rep, where, cs)
+        if not apply_contract(rep, where, d, "member"):
+            check_req(rep, "member", where, d)
+        links = d.get("links") if isinstance(d.get("links"), dict) else {}
+        av = sml.as_str(d.get("avatar", ""))
+        avatar = ""
+        src = None
+        if av.startswith(("http://", "https://")):
+            avatar = av
+        else:
+            if av:
+                p = ROOT / av
+                if p.exists():
+                    src = p
+                else:
+                    rep.warn(where, "avatar 指向的文件不存在：%s" % av)
+            if src is None:
+                src = find_avatar(f.stem)
+        out.append({
+            "id": f.stem,
+            "name": sml.as_str(pick(d, ["name"], f.stem)),
+            "avatar": avatar,
+            "_avatar_src": str(src) if src else "",
+            "signature": sml.as_str(d.get("signature", "")),
+            "role": sml.as_str(d.get("role", "群友")),
+            "skills": [sml.as_str(x) for x in as_list(d.get("skills"))],
+            "links": {k: sml.as_str(v) for k, v in links.items()
+                      if not k.startswith("__") and sml.as_str(v)},
+            "joined": sml.as_str(d.get("joined", "")),
+            "file": where,
+        })
+    return out
+
+
+def build_topics(rep):
+    """主题词条：一个词条聚合多篇文章 + 定义。"""
+    out = []
+    for f in docs_in(CONTENT / "topics"):
+        d, cs = load2(f)
+        where = f.relative_to(ROOT).as_posix()
+        register_contracts(rep, where, cs)
+        if not apply_contract(rep, where, d, "topic"):
+            check_req(rep, "topic", where, d)
+        ctx = render.Ctx()
+        html_body, toc = render_body(d, ctx, 1)
+        out.append({
+            "id": f.stem,
+            "title": sml.as_str(d.get("title")),
+            "summary": sml.as_str(d.get("summary", "")),
+            "tags": [sml.as_str(x) for x in as_list(d.get("tags"))],
+            "posts": [sml.as_str(x) for x in as_list(d.get("posts"))],
+            "related": [sml.as_str(x) for x in as_list(d.get("related"))],
+            "html": "topics/%s.html" % f.stem,
+            "map": "topics/%s.map.svg" % f.stem,
+            "toc": toc,
+            "text": render.strip_html(html_body),
+            "file": where,
+            "_html": html_body,
+        })
+    return out
+
+
+def build_simple(kind, rep):
+    out = []
+    for f in docs_in(CONTENT / kind):
+        d, cs = load2(f)
+        where = f.relative_to(ROOT).as_posix()
+        register_contracts(rep, where, cs)
+        if not apply_contract(rep, where, d, {"resources": "resource", "pages": "page"}.get(kind, kind)):
+            check_req(rep, kind.rstrip("s"), where, d)
+        base = {
+            "id": f.stem,
+            "title": sml.as_str(d.get("title")),
+            "file": where,
+        }
+        if kind == "resources":
+            base.update({
+                "kind": sml.as_str(d.get("kind")),
+                "url": sml.as_str(d.get("url")),
+                "tags": [sml.as_str(x) for x in as_list(d.get("tags"))],
+                "note": sml.as_str(d.get("note", "")),
+            })
+        if kind == "weekly":
+            ctx = render.Ctx()
+            base.update({
+                "period": sml.as_str(d.get("period")),
+                "highlights": [sml.as_str(x) for x in as_list(d.get("highlights"))],
+                "merged": [sml.as_str(x) for x in as_list(d.get("merged"))],
+                "contributors": [sml.as_str(x) for x in as_list(d.get("contributors"))],
+                "html": "w/%s.html" % f.stem,
+            })
+            out.append((base, d, ctx, f))
+            continue
+        if kind == "pages":
+            ctx = render.Ctx()
+            base.update({
+                "html": "pages/%s.html" % f.stem,
+                "group": sml.as_str(d.get("group", "其它")),
+                "order": d.get("order") if isinstance(d.get("order"), int) else 999,
+                "group_link": sml.as_str(d.get("group_link", "")),
+            })
+            out.append((base, d, ctx, f))
+            continue
+        out.append(base)
+    return out
+
+
+def build_contract_page():
+    """从契约表自动生成文档页：代码即文档。"""
+    if not GLOBAL_CONTRACTS:
+        return None
+    esc = render.esc
+    html = ['<p class="muted">本页由 <code>content/contracts/*.sml</code> 自动生成 —— 改契约即改这里。'
+            '错误码见 docs/ARCHITECTURE.md。</p>\n']
+    toc = []
+    nodes = []
+    for c in contract_mod.describe(GLOBAL_CONTRACTS):
+        ident = "contract-" + c["name"]
+        toc.append({"id": ident, "text": c["name"], "level": 2})
+        html.append('<h2 id="%s">%s%s</h2>\n' % (ident, esc(c["name"]), "（loose）" if c["loose"] else ""))
+        html.append("<table>\n<thead><tr><th>字段</th><th>类型</th><th>必填</th><th>约束</th><th>说明</th></tr></thead>\n<tbody>\n")
+        kids = []
+        for f in c["fields"]:
+            html.append("<tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n"
+                        % (esc(f["name"]), esc(f["type"]), "是" if f["required"] else "否",
+                           esc(f["constraint"]), esc(f["doc"])))
+            kids.append({"label": f["name"], "children": []})
+        html.append("</tbody>\n</table>\n")
+        nodes.append({"label": c["name"], "href": "#/page/contracts/" + ident, "children": kids})
+    body = "".join(html)
+    return {
+        "id": "contracts",
+        "title": "内容契约（自动生成）",
+        "group": "规范",
+        "order": 2,
+        "html": "pages/contracts.html",
+        "map": "pages/contracts.map.svg",
+        "toc": toc,
+        "text": render.strip_html(body),
+        "generated": True,
+        "_html": body,
+        "_map": mindmap.to_svg({"label": "内容契约", "href": "#/page/contracts", "children": nodes},
+                               "内容契约"),
+    }
+
+
+MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+        ".webp": "image/webp", ".svg": "image/svg+xml", ".gif": "image/gif"}
+
+
+def inject_head(rep, out, manifest, avatar):
+    """把标题/描述/favicon（群 logo）注入静态壳，并生成 webmanifest。"""
+    idx = out / "index.html"
+    if not idx.exists():
+        return
+    site = manifest["site"]
+    icon = ""
+    if avatar:
+        suffix = Path(avatar).suffix.lower()
+        icon = "favicon" + suffix
+        try:
+            shutil.copy2(out / avatar, out / icon)
+        except OSError:
+            icon = avatar
+    lines = ['<meta name="description" content="%s">' % render.esc(site.get("tagline", "")),
+             '<meta name="theme-color" content="#b4552d">',
+             '<meta property="og:title" content="%s">' % render.esc(site["title"]),
+             '<meta property="og:description" content="%s">' % render.esc(site.get("tagline", "")),
+             '<meta property="og:type" content="website">',
+             '<meta property="og:url" content="%s">' % render.esc(site["url"])]
+    if icon:
+        lines += ['<link rel="icon" href="%s">' % icon,
+                  '<link rel="apple-touch-icon" href="%s">' % icon,
+                  '<link rel="manifest" href="site.webmanifest">']
+        lines.append('<meta property="og:image" content="%s/%s">' % (site["url"].rstrip("/"), icon))
+    html = idx.read_text(encoding="utf-8").replace("<!--BUILD:HEAD-->", "\n".join(lines))
+    html = html.replace("<title>Rust嵌入式探讨</title>", "<title>%s</title>" % render.esc(site["title"]))
+    idx.write_text(html, encoding="utf-8")
+
+    if icon:
+        mani = {"name": site["title"], "short_name": site["title"][:12], "start_url": "./",
+                "display": "standalone", "background_color": "#fbfaf7", "theme_color": "#b4552d",
+                "icons": [{"src": icon, "sizes": "any",
+                           "type": MIME.get(Path(icon).suffix.lower(), "image/jpeg")}]}
+        (out / "site.webmanifest").write_text(json.dumps(mani, ensure_ascii=False, indent=1),
+                                              encoding="utf-8")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=str(OUT))
+    ap.add_argument("--offline", action="store_true")
+    ap.add_argument("--warn-only", action="store_true")
+    ap.add_argument("--base-url", default="", help="覆盖 site.sml 里的站点 URL（多域名/预览用）")
+    ap.add_argument("--contract-loose", action="store_true",
+                    help="放宽 E-CONTRACT-004（未声明字段）——临时允许契约外的字段")
+    config.add_site_arg(ap)
+    args = ap.parse_args()
+    out = Path(args.out)
+    rep = Report()
+
+    print("== rec-blog build ==")
+    site_path = CONTENT / "site.sml"
+    site = load(site_path) if site_path.exists() else {}
+    if not site:
+        rep.err("site.sml", "缺失或为空")
+    check_req(rep, "site", "site.sml", site)
+    group = site.get("group") if isinstance(site.get("group"), dict) else {}
+
+    avatar = None
+    for cand in ("group.jpg", "group.jpeg"):
+        if (ROOT / cand).exists():
+            avatar = cand
+            break
+    if avatar is None:
+        for p in sorted(ROOT.glob("*.jpg")) + sorted(ROOT.glob("*.jpeg")):
+            avatar = p.name
+            break
+    if avatar is None:
+        rep.warn("根目录", "未找到群头像 group.jpg")
+
+    global CONTRACT_LOOSE
+    CONTRACT_LOOSE = args.contract_loose
+    CONTRACT_DEFAULTS.clear()
+    CONTRACT_DEFAULTS.update({k: sml.as_str(v) for k, v in (site.get("contracts") or {}).items()
+                              if sml.as_str(v)})
+    print("-- 站点：%s" % ROOT)
+    print("-- 契约")
+    for f in docs_in(CONTENT / "contracts"):
+        _, cs = load2(f)
+        register_contracts(rep, f.relative_to(ROOT).as_posix(), cs)
+    print("   %d 个契约，默认映射 %d 项" % (len(GLOBAL_CONTRACTS), len(CONTRACT_DEFAULTS)))
+
+    cache = repo_meta.Cache(CACHE)
+    print("-- 文章")
+    posts = build_posts(rep, cache, args.offline)
+    print("   %d 篇" % len(posts))
+    print("-- 项目")
+    projects = build_projects(rep, cache, args.offline)
+    print("   %d 个" % len(projects))
+    print("-- 成员")
+    members = build_members(rep)
+    print("   %d 人" % len(members))
+    print("-- 主题词条")
+    topics = build_topics(rep)
+    print("   %d 条" % len(topics))
+    print("-- 资源 / 周报 / 文档页")
+    resources = build_simple("resources", rep)
+    weekly_raw = build_simple("weekly", rep)
+    pages_raw = build_simple("pages", rep)
+    weekly = [w[0] for w in weekly_raw]
+    pages = sorted([w[0] for w in pages_raw], key=lambda x: (x.get("group", ""), x.get("order", 999), x["id"]))
+    print("   %d 个文档页" % len(pages))
+
+    ids = {m["id"] for m in members}
+    for p in posts:
+        if p["author"] and p["author"] not in ids:
+            rep.warn(p["file"], "作者 `%s` 没有成员档案" % p["author"])
+    for pr in projects:
+        for who in [pr["owner"]] + pr["contributors"]:
+            if who and who not in ids:
+                rep.warn("projects/%s.sml" % pr["id"], "成员 `%s` 没有成员档案" % who)
+
+    # 词条 ↔ 文章双向关联：词条显式列 posts，或按同标签自动收
+    posts_by_slug = {p["slug"]: p for p in posts}
+    for t in topics:
+        ids = [s for s in t["posts"] if s in posts_by_slug]
+        for p in posts:
+            if p["slug"] not in ids and any(tag in p["tags"] for tag in t["tags"]):
+                ids.append(p["slug"])
+        t["resolved"] = ids
+        for s in ids:
+            posts_by_slug[s].setdefault("topics", []).append(t["id"])
+    for t in topics:
+        missing = [s for s in t["posts"] if s not in posts_by_slug]
+        for s in missing:
+            rep.warn(t["file"], "词条引用了不存在的文章 slug `%s`" % s)
+
+    series_map = {}
+    for p in posts:
+        if p["series"]:
+            series_map.setdefault(p["series"], []).append(p)
+    series = []
+    for sid, group_posts in series_map.items():
+        items = sorted(group_posts, key=lambda p: (p["order"] if isinstance(p["order"], int) else 999, p["date"]))
+        title = next((p["series_title"] for p in items if p["series_title"]), sid)
+        series.append({
+            "id": sid,
+            "title": title,
+            "posts": [{"slug": p["slug"], "title": p["title"], "order": p["order"]} for p in items],
+        })
+
+    tag_count = {}
+    for p in posts:
+        for t in p["tags"]:
+            tag_count[t] = tag_count.get(t, 0) + 1
+    tags = sorted([{"tag": k, "count": v} for k, v in tag_count.items()], key=lambda x: (-x["count"], x["tag"]))
+
+    clean_out(out)
+    (out / "p").mkdir(parents=True, exist_ok=True)
+    for p in posts:
+        (out / p["html"]).write_text(p["_html"] or "<p>（空）</p>", encoding="utf-8")
+        (out / p["map"]).write_text(p["_map"], encoding="utf-8")
+    for base, d, ctx, f in weekly_raw + pages_raw:
+        html_body, toc = render_body(d, ctx, 1)
+        (out / base["html"]).parent.mkdir(parents=True, exist_ok=True)
+        (out / base["html"]).write_text(html_body or "<p>（空）</p>", encoding="utf-8")
+        base["toc"] = toc
+        base["text"] = render.strip_html(html_body)
+        kind = "w" if f.parent.name == "weekly" else "pages"
+        base["map"] = "%s/%s.map.svg" % (kind, f.stem)
+        prefix = "#/weekly/" if kind == "w" else "#/page/"
+        nodes = [dict(x, anchor="%s%s/%s" % (prefix, f.stem, x["id"])) for x in ctx.toc]
+        (out / base["map"]).write_text(
+            mindmap.to_svg(mindmap.from_toc(base["title"], nodes), base["title"]), encoding="utf-8")
+
+    for t in topics:
+        (out / t["html"]).parent.mkdir(parents=True, exist_ok=True)
+        (out / t["html"]).write_text(t["_html"] or "<p>（空）</p>", encoding="utf-8")
+        nodes = [dict(x, anchor="#/topic/%s/%s" % (t["id"], x["id"])) for x in t["toc"]]
+        (out / t["map"]).write_text(
+            mindmap.to_svg(mindmap.from_toc(t["title"], nodes), t["title"]), encoding="utf-8")
+
+    contract_entry = build_contract_page()
+    if contract_entry:
+        (out / contract_entry["html"]).parent.mkdir(parents=True, exist_ok=True)
+        (out / contract_entry["html"]).write_text(contract_entry["_html"], encoding="utf-8")
+        (out / contract_entry["map"]).write_text(contract_entry["_map"], encoding="utf-8")
+        pages.append({k: v for k, v in contract_entry.items() if not k.startswith("_")})
+        pages.sort(key=lambda x: (x.get("group", ""), x.get("order", 999), x["id"]))
+
+    site_map = {"label": sml.as_str(site.get("title")), "href": "#/", "children": []}
+    art = {"label": "文章库", "children": []}
+    for s in series:
+        art["children"].append({
+            "label": s["title"],
+            "children": [{"label": x["title"], "href": "#/post/" + x["slug"], "children": []}
+                         for x in s["posts"]],
+        })
+    singles = [p for p in posts if not p["series"]]
+    if singles:
+        by_year = {}
+        for p in singles:
+            by_year.setdefault(p["year"], []).append(p)
+        for y in sorted(by_year, reverse=True):
+            art["children"].append({
+                "label": "%s 年" % y,
+                "children": [{"label": p["title"], "href": "#/post/" + p["slug"], "children": []}
+                             for p in by_year[y]],
+            })
+    if art["children"]:
+        site_map["children"].append(art)
+    if projects:
+        site_map["children"].append({"label": "项目", "children": [
+            {"label": p["name"], "href": "#/projects", "children": []} for p in projects]})
+    if members:
+        site_map["children"].append({"label": "成员", "children": [
+            {"label": m["name"], "href": "#/member/" + m["id"], "children": []} for m in members]})
+    if resources:
+        site_map["children"].append({"label": "资源", "href": "#/resources", "children": [
+            {"label": r["title"], "href": "#/resources", "children": []} for r in resources]})
+    if weekly:
+        site_map["children"].append({"label": "周报", "children": [
+            {"label": w["period"], "href": "#/weekly/" + w["id"], "children": []} for w in weekly]})
+    site_map["children"].insert(1, {
+        "label": "文章知识", "href": "#/knowledge", "children": [
+            {"label": "主题词条", "href": "#/topics", "children": [
+                {"label": t["title"], "href": "#/topic/" + t["id"], "children": []} for t in topics]},
+            {"label": "标签", "children": [
+                {"label": "#" + t["tag"], "href": "#/library", "children": []} for t in tags[:8]]},
+        ],
+    })
+    site_map["children"].append({"label": "加入我们", "href": "#/join", "children": []})
+    if pages:
+        groups = {}
+        for d in pages:
+            groups.setdefault(d.get("group", "其它"), []).append(d)
+        site_map["children"].append({
+            "label": "站文档", "children": [
+                {"label": g, "children": [
+                    {"label": d["title"], "href": "#/page/" + d["id"], "children": []} for d in items]}
+                for g, items in groups.items()],
+        })
+    (out / "map.svg").write_text(
+        mindmap.to_svg(site_map, sml.as_str(site.get("title"))), encoding="utf-8")
+
+    manifest = {
+        "site": {
+            "title": sml.as_str(site.get("title")),
+            "tagline": sml.as_str(site.get("tagline", "")),
+            "url": args.base_url or sml.as_str(site.get("url", "https://rec-blog.swebase.cn")),
+            "domains": [sml.as_str(x) for x in as_list(site.get("domains"))],
+            "license": sml.as_str(site.get("default_license", "")),
+            "announcement": sml.as_str(site.get("announcement", "")),
+            "nav": [sml.as_str(x) for x in as_list(site.get("nav"))] or [
+                "library", "knowledge", "topics", "projects", "resources", "members",
+                "weekly", "pages", "join"],
+            "avatar": avatar,
+            "group": {
+                "name": sml.as_str(group.get("name", sml.as_str(site.get("title")))),
+                "qq": sml.as_str(group.get("qq", "")),
+                "join": sml.as_str(group.get("join", "")),
+                "join_url": sml.as_str(group.get("join_url", "")),
+                "intro": sml.as_str(group.get("intro", "")),
+                "rules": [sml.as_str(x) for x in as_list(group.get("rules"))],
+                "features": [sml.as_str(x) for x in as_list(group.get("features"))],
+                "timeline": [
+                    {"date": sml.as_str(t.get("date")), "text": sml.as_str(t.get("text"))}
+                    for t in as_list(group.get("timeline")) if isinstance(t, dict)
+                ],
+            },
+        },
+        "posts": [{k: v for k, v in p.items() if not k.startswith("_")} for p in posts],
+        "projects": projects,
+        "members": members,
+        "resources": resources,
+        "weekly": weekly,
+        "topics": [{k: v for k, v in t.items() if not k.startswith("_")} for t in topics],
+        "pages": pages,
+        "series": series,
+        "tags": tags,
+        "built_at": now_iso(),
+    }
+
+    (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    search = []
+    for p in posts:
+        search.append({"title": p["title"], "summary": p["summary"], "tags": p["tags"],
+                       "url": "#/post/" + p["slug"], "text": p["_text"][:4000]})
+    for pr in projects:
+        search.append({"title": pr["name"], "summary": pr["one_liner"], "tags": pr["languages"],
+                       "url": "#/projects", "text": pr["one_liner"]})
+    for m in members:
+        search.append({"title": m["name"], "summary": m["signature"], "tags": m["skills"],
+                       "url": "#/member/" + m["id"], "text": m["signature"]})
+    for r in resources:
+        search.append({"title": r["title"], "summary": r.get("note", ""), "tags": r.get("tags", []),
+                       "url": "#/resources", "text": r.get("note", "")})
+    (out / "search-index.json").write_text(json.dumps(search, ensure_ascii=False), encoding="utf-8")
+
+    # AI 可读的站点文档（llms.txt 约定）：索引放 llms.txt，正文合并放 llms-full.txt
+    base_url0 = manifest["site"]["url"].rstrip("/")
+    g = manifest["site"]["group"]
+    L = ["# %s" % manifest["site"]["title"], "",
+         "> %s" % (manifest["site"]["tagline"] or ""), "",
+         "- 站点：%s" % base_url0,
+         "- 仓库：https://gitee.com/snoware/rec-blog（Gitee 是权威源；投稿走 PR，或交给群管理代投）",
+         "- 默认许可：%s" % (manifest["site"]["license"] or "见文章内 license 字段"),
+         "- RSS：%s/feed.xml" % base_url0,
+         "- 全部正文纯文本：%s/llms-full.txt" % base_url0,
+         "- 加入群：%s" % (g.get("join_url") or ""), "",
+         "## 文章（%d 篇）" % len(posts)]
+    for p in posts:
+        L.append("- [%s](%s/#/post/%s) — %s · %s · %s"
+                 % (p["title"], base_url0, p["slug"], p["date"], "/".join(p["tags"]), p["summary"]))
+    L.append("")
+    if series:
+        L.append("## 系列")
+        for s in series:
+            L.append("- %s：%s" % (s["title"], " / ".join(x["title"] for x in s["posts"])))
+        L.append("")
+    if topics:
+        L.append("## 主题词条")
+        for t in topics:
+            L.append("- [%s](%s/#/topic/%s) — %s（关联文章 %d 篇）"
+                     % (t["title"], base_url0, t["id"], t["summary"], len(t.get("resolved", []))))
+        L.append("")
+    L.append("## 站文档")
+    for d in pages:
+        L.append("- [%s](%s/#/page/%s)（%s）%s"
+                 % (d["title"], base_url0, d["id"], d.get("group", ""),
+                    " — " + d.get("text", "")[:80] if d.get("text") else ""))
+    L.append("")
+    L.append("## 项目")
+    for pr in projects:
+        meta = pr.get("meta") or {}
+        L.append("- [%s](%s) — %s%s%s"
+                 % (pr["name"], pr["repo"], pr["one_liner"],
+                    " · " + str(meta.get("language")) if meta.get("language") else "",
+                    " · ★%s" % meta.get("stars") if meta.get("stars") is not None else ""))
+    L.append("")
+    L.append("## 成员")
+    for mem in members:
+        L.append("- %s（%s）%s" % (mem["name"], mem["role"], mem["signature"]))
+    L.append("")
+    L.append("## 资源")
+    for r in resources:
+        L.append("- [%s](%s)（%s）%s" % (r["title"], r["url"], r["kind"], r.get("note", "")))
+    (out / "llms.txt").write_text("\n".join(L) + "\n", encoding="utf-8")
+
+    F = ["# %s — 全部文章正文（纯文本）" % manifest["site"]["title"], ""]
+    for p in posts:
+        F.append("=" * 70)
+        F.append("# %s" % p["title"])
+        F.append("URL: %s/#/post/%s" % (base_url0, p["slug"]))
+        F.append("作者: %s | 日期: %s | 标签: %s | 许可: %s"
+                 % (p["author"], p["date"], ", ".join(p["tags"]), p["license"] or manifest["site"]["license"]))
+        F.append("摘要: %s" % p["summary"])
+        F.append("")
+        F.append(p["_text"])
+        F.append("")
+    (out / "llms-full.txt").write_text("\n".join(F), encoding="utf-8")
+
+    base_url = manifest["site"]["url"].rstrip("/")
+    urls = [base_url + "/"] + [base_url + "/#/post/" + p["slug"] for p in posts] + \
+           [base_url + "/#/projects"] + [base_url + "/#/member/" + m["id"] for m in members] + \
+           [base_url + "/#/resources"] + [base_url + "/#/group"] + \
+           [base_url + "/#/topic/" + t["id"] for t in topics]
+    sm = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for u in urls:
+        sm.append("  <url><loc>%s</loc></url>" % esc(u))
+    sm.append("</urlset>")
+    (out / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
+
+    feed = ['<?xml version="1.0" encoding="UTF-8"?>',
+            '<rss version="2.0"><channel>',
+            "<title>%s</title>" % esc(manifest["site"]["title"]),
+            "<link>%s</link>" % esc(base_url),
+            "<description>%s</description>" % esc(manifest["site"]["tagline"]),
+            "<lastBuildDate>%s</lastBuildDate>" % now_iso()]
+    for p in posts[:20]:
+        feed.append("<item><title>%s</title><link>%s/#/post/%s</link><guid>%s/#/post/%s</guid>"
+                    "<pubDate>%s</pubDate><description>%s</description></item>" % (
+                        esc(p["title"]), esc(base_url), p["slug"], esc(base_url), p["slug"],
+                        esc(p["date"]), esc(p["summary"])))
+    feed.append("</channel></rss>")
+    (out / "feed.xml").write_text("\n".join(feed), encoding="utf-8")
+
+    for p in posts:
+        src = ROOT / Path(p["file"]).parent / "assets"
+        if src.exists():
+            dst = out / "assets" / "posts" / p["slug"]
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(src, dst)
+    for m in members:
+        src_rel = m.pop("_avatar_src", "")
+        if not src_rel or m["avatar"]:
+            continue
+        src = Path(src_rel)
+        dst = out / "assets" / "members" / ("%s%s" % (m["id"], src.suffix.lower()))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        m["avatar"] = "assets/members/" + dst.name
+    if avatar:
+        shutil.copy2(ROOT / avatar, out / avatar)
+
+    site_dir = THEME
+    if site_dir.exists():
+        for f in site_dir.iterdir():
+            if f.is_file():
+                shutil.copy2(f, out / f.name)
+
+    inject_head(rep, out, manifest, avatar)
+
+    cache.save()
+
+    print("-- 校验")
+    for w in rep.warnings:
+        print("  [warn] %s" % w)
+    for e in rep.errors:
+        print("  [error] %s" % e)
+    if rep.errors and not args.warn_only:
+        print("构建失败：%d 个错误" % len(rep.errors))
+        return 1
+    print("产物：%s（文章 %d / 项目 %d / 成员 %d）" % (out, len(posts), len(projects), len(members)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 投稿 / 制度 / 故障（请到 Gitee）
+    url: https://gitee.com/snoware/rec-blog/issues
+    about: GitHub 侧是只读镜像，Issue 与 PR 都在 Gitee 上处理。
+  - name: 安全与隐私问题（请勿公开细节）
+    url: https://gitee.com/snoware/rec-blog/blob/master/site/content/pages/privacy.md
+    about: 发现密钥泄露或站点被篡改，请先私信管理员，不要公开细节。

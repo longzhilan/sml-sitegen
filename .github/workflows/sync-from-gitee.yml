@@ -1,0 +1,66 @@
+name: 从 Gitee 同步镜像
+# Gitee 是唯一权威源；GitHub 只做单向镜像，供 Actions 构建并发布到 Cloudflare Pages。
+# 防误覆盖：检测到 GitHub 上有 Gitee 没有的提交时默认中止；只有手动触发且勾选 force 才丢弃。
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 丢弃 GitHub 上 Gitee 没有的提交（危险，仅镜像修复时用）
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-from-gitee
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 配置 git 与 Gitee 远端
+        env:
+          GITEE_USER: ${{ secrets.GITEE_USER }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          git config user.name "gitee-mirror"
+          git config user.email "gitee-mirror@users.noreply.github.com"
+          if [ -n "$GITEE_TOKEN" ]; then
+            URL="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/snoware/rec-blog.git"
+          else
+            URL="https://gitee.com/snoware/rec-blog.git"
+          fi
+          git remote remove gitee 2>/dev/null || true
+          git remote add gitee "$URL"
+
+      - name: 拉取 Gitee
+        run: git fetch gitee master:refs/remotes/gitee/master --tags --force
+
+      - name: 防误覆盖检查
+        run: |
+          ahead=$(git log --oneline HEAD --not refs/remotes/gitee/master | wc -l)
+          if [ "$ahead" -gt 0 ]; then
+            echo "GitHub 上有 $ahead 个 Gitee 没有的提交："
+            git log --oneline HEAD --not refs/remotes/gitee/master | head -20
+            if [ "${{ inputs.force }}" != "true" ]; then
+              echo "::error::镜像将覆盖这些提交，已中止。确认要丢弃请手动触发并勾选 force。"
+              exit 1
+            fi
+            echo "::warning::force=true，这些提交将被丢弃。"
+          fi
+
+      - name: 同步到 GitHub
+        run: |
+          git checkout -B master refs/remotes/gitee/master
+          git push origin master --force
+          git push origin --tags --force
+          echo "已同步：$(git rev-parse --short HEAD)"

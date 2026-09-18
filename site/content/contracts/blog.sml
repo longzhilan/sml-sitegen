@@ -1,0 +1,112 @@
+# 内容契约：字段即文档。改这里 = 同时改校验规则和「文档 → 规范 → 内容契约」页。
+#
+# 应用方式两种：
+#   1) 文件里写 `@is 契约名`（在文件顶部或块内首行）
+#   2) 在 content/site.sml 的 `contracts { }` 里设默认契约，按内容类型生效
+#
+# 报错形如：content/posts/.../index.md: [E-CONTRACT-003] 契约 `BlogPost` 缺少必填字段 `summary`（字符串）
+# 码表见 docs/ARCHITECTURE.md；与 SML 上游 sml-codes 对齐。
+
+@contract BlogPost {
+  title: str              # 标题
+  author: str             # 成员 id，对应 content/members/<id>
+  date: date              # 首次发布日期
+  tags: [str]             # 标签，至少一个
+  summary: str            # 一句话摘要（列表页与分享卡片用）
+  updated: date optional  # 最后更新日期
+  license: str optional   # 覆盖站点默认许可
+  draft: bool optional    # 草稿：true 则不参与构建
+  series: Series optional # 系列：自动进侧栏树与上一章/下一章
+  video: str optional     # B 站 BV 号
+  attachments: [Attachment] optional
+  co_authors: [str] optional
+  body: any optional      # SML 写法的正文块数组（Markdown 走 front matter + 正文）
+}
+
+@contract Series {
+  id: str                 # 系列 id（相同 id 归为一组）
+  order: int min 0        # 组内顺序
+  title: str optional     # 系列显示名，缺省用 id
+}
+
+@contract Attachment {
+  name: str               # 附件显示名
+  kind: enum [ image link ]  # image 入库；link 走作者自备外链
+  url: str                # image 用相对路径（同目录 assets/），link 用 http(s)
+  size: str optional      # 体积说明，image 可由构建自动填
+}
+
+@contract Page {
+  title: str              # 页面标题
+  group: str              # 文档树归组（指南 / 写作 / 规范 / 关于 …）
+  order: int min 0        # 同组内顺序
+  body: any optional
+  group_link: url optional # 该页顶部的行动按钮（如加群链接）
+}
+
+@contract Topic {
+  loose
+  title: str              # 词条名
+  summary: str            # 一句话定义（知识页与词条页用）
+  tags: [str] optional    # 同标签的文章会自动归入本词条
+  posts: [str] optional   # 显式关联的文章 slug
+  related: [str] optional # 相关词条 id
+  body: any optional      # 定义、要点、参考资料
+}
+
+@contract Resource {
+  loose
+  title: str              # 资源名
+  kind: enum [ book tutorial tool video course route ]  # 类型
+  url: url                # 链接
+  tags: [str] optional
+  note: str optional      # 一句话说明
+}
+
+@contract Project {
+  name: str               # 项目名
+  one_liner: str          # 一句话简介
+  repo: url               # 仓库地址（构建期抓元数据）
+  status: enum [ active archived wip ]
+  host: enum [ github gitee codeberg gitea ] optional
+  homepage: url optional
+  docs: url optional
+  license: str optional
+  languages: [str] optional
+  platforms: [str] optional
+  owner: str optional     # 成员 id
+  contributors: [str] optional
+  featured: bool optional # 是否上首页精选
+  meta_source: enum [ auto manual ] optional
+  meta_override: any optional
+}
+
+@contract Member {
+  loose
+  name: str               # 群昵称
+  role: str optional      # 群主 / 管理员 / 群友 …
+  avatar: str optional    # 头像文件路径（相对仓库根）
+  signature: str optional # 个性签名
+  skills: [str] optional
+  joined: date optional
+  links: MemberLinks optional
+}
+
+@contract MemberLinks {
+  loose
+  blog: url optional
+  homepage: url optional
+  github: url optional
+  gitee: url optional
+  email: str optional     # 由本人提供并授权展示；不想公开就删掉这一行
+}
+
+@contract Weekly {
+  loose
+  period: str             # 期号，如 2026-W38
+  title: str              # 本期标题
+  highlights: [str] optional
+  merged: [str] optional  # 关联文章 slug
+  contributors: [str] optional
+  body: any optional
+}
