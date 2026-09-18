@@ -1,7 +1,7 @@
 # rec-blog 架构与内容规格（v0.1 草案）
 
 站名：**Rust嵌入式探讨** ｜ 域名：`rec-blog.swebase.cn`（CNAME → `swe.os.kg`）
-权威仓库：`gitee.com/snoware/rec-blog`（**只走 Gitee**）
+权威仓库：`gitee.com/rustembed/site`（**只走 Gitee**）
 构建发布：Gitee 权威 + 单向镜像到 GitHub，GitHub Actions 构建 → Pages 托管（静态）
 
 ## 0. 三条硬约束

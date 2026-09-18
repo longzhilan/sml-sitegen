@@ -45,6 +45,12 @@ need(m["site"]["url"].startswith("http"), "site.url 非法")
 need(m["site"].get("domains"), "site.domains 为空（多域名应配置）")
 need(m["site"]["group"].get("join_url"), "site.group.join_url 为空（「加入我们」按钮需要）")
 need(m["site"]["nav"], "site.nav 为空（左栏导航需要）")
+need(m["site"].get("repo_url"), "site.repo_url 为空（仓库地址应只有这一处数据源）")
+_self = [p for p in m["projects"] if p["id"] == "rec-blog"]
+if _self and m["site"].get("repo_url"):
+    need(_self[0]["repo"].rstrip("/") == m["site"]["repo_url"].rstrip("/"),
+         "项目 rec-blog 的 repo 与 site.repo_url 不一致（%s ≠ %s）"
+         % (_self[0]["repo"], m["site"]["repo_url"]))
 
 idx = (DIST / "index.html").read_text(encoding="utf-8")
 need("<!--BUILD:HEAD-->" not in idx, "index.html 里的 <!--BUILD:HEAD--> 占位没被替换")

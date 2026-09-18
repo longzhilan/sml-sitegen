@@ -73,7 +73,7 @@ BV1GJ411x7h7
 attachments:
   - name: 示例工程
     kind: link
-    url: https://gitee.com/snoware/rec-blog
+    url: https://gitee.com/rustembed/site
     size: 1.2 MB
 ```
 

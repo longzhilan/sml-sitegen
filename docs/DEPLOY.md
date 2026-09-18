@@ -16,7 +16,7 @@
 
 **Gitee（权威源，接受 PR）**
 
-1. 建仓库 `gitee.com/snoware/rec-blog`，**公开**（否则群友无法 fork/提 PR）；
+1. 建仓库 `gitee.com/rustembed/site`，**公开**（否则群友无法 fork/提 PR）；
 2. 填仓库简介与主页链接（站点域名），勾选 Issue；
 3. 邀请成员：`管理 → 仓库成员管理 → 邀请用户`，按制度给角色
    - 群主 → `管理员`（Owner 级）
@@ -49,7 +49,8 @@ python engine/cli.py test && python engine/cli.py build && python engine/cli.py 
 
 ## 1. 仓库
 
-- 权威源：`https://gitee.com/snoware/rec-blog`，**所有改动先推这里**（GitHub 只读镜像，不回写）。
+- 权威源：`https://gitee.com/rustembed/site`，**所有改动先推这里**（GitHub 只读镜像，不回写）。
+  仓库地址的唯一数据源是 `site/content/site.sml` 的 `repo_url`；改地址时先改这里，再同步本文档与 `.github/`、`.gitee/` 模板。
 - 镜像：`.github/workflows/sync-from-gitee.yml`，每 6 小时 + 手动触发；检测到 GitHub 上有 Gitee 没有的提交会**中止告警**，只有手动触发并勾 `force` 才丢弃。
 
 需要配置的 Actions secrets：

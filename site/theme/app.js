@@ -813,6 +813,13 @@ async function render_() {
   f.appendChild(el('a', '', 'RSS')).href = 'feed.xml';
   f.appendChild(el('a', '', 'Sitemap')).href = 'sitemap.xml';
   f.appendChild(el('a', '', 'llms.txt')).href = 'llms.txt';
+  if (m.site.repo_url) {
+    const repo = el('a', '', '仓库');
+    repo.href = m.site.repo_url;
+    repo.target = '_blank';
+    repo.rel = 'noopener';
+    f.appendChild(repo);
+  }
   if (m.site.license) f.appendChild(el('span', 'muted', '默认许可：' + m.site.license));
 }
 

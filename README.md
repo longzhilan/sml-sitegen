@@ -82,7 +82,8 @@ dist/                     构建产物（gitignore）
 
 ## 部署
 
-Gitee 是权威源（本仓库只推 Gitee）；`.github/workflows/sync-from-gitee.yml` 每 6 小时把它单向镜像到
+Gitee 是权威源：<https://gitee.com/rustembed/site>（地址的唯一数据源是 `site/content/site.sml` 的 `repo_url`）；
+`.github/workflows/sync-from-gitee.yml` 每 6 小时把它单向镜像到
 GitHub，`build.yml` 在 Actions 里构建并用 `wrangler pages deploy dist` 发布到 Cloudflare Pages。
 需要的 secret：`GITEE_USER` / `GITEE_TOKEN`（只读即可）、`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`。
 

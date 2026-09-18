@@ -5,7 +5,7 @@ order: 2
 # 这里是真正的 SML 注释：这一页本身就是 SML 写的。
 # 片段：定义一次，多处用 &名字 引用。
 @常见链接 {
-  repo: "https://gitee.com/snoware/rec-blog"
+  repo: "https://gitee.com/rustembed/site"
   sml: "https://sml.swebase.cn"
 }
 
@@ -53,8 +53,8 @@ body: [
       section 片段复用 {
         children: [
           para { text: "把重复的部分定义成 @名字，用 &名字 以值的形式引用。本站的成员档案就是这么写的。" }
-          code { lang: sml text: "@链接 {\n  repo: \"https://gitee.com/snoware/rec-blog\"\n  sml: \"https://sml.swebase.cn\"\n}\n\n档案 {\n  name: Sal\n  links: &链接\n}" }
-          para { text: "参考：{link: https://gitee.com/snoware/rec-blog|本仓库}、{link: https://sml.swebase.cn|SML 官网}。" }
+          code { lang: sml text: "@链接 {\n  repo: \"https://gitee.com/rustembed/site\"\n  sml: \"https://sml.swebase.cn\"\n}\n\n档案 {\n  name: Sal\n  links: &链接\n}" }
+          para { text: "参考：{link: https://gitee.com/rustembed/site|本仓库}、{link: https://sml.swebase.cn|SML 官网}。" }
         ]
       }
     ]

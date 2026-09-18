@@ -51,5 +51,5 @@ body: [
 ]
 
 attachments: [
-  { name: "示例工程" kind: link url: "https://gitee.com/snoware/rec-blog" size: "—" }
+  { name: "示例工程" kind: link url: "https://gitee.com/rustembed/site" size: "—" }
 ]

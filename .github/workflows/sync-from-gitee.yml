@@ -35,9 +35,9 @@ jobs:
           git config user.name "gitee-mirror"
           git config user.email "gitee-mirror@users.noreply.github.com"
           if [ -n "$GITEE_TOKEN" ]; then
-            URL="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/snoware/rec-blog.git"
+            URL="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/rustembed/site.git"
           else
-            URL="https://gitee.com/snoware/rec-blog.git"
+            URL="https://gitee.com/rustembed/site.git"
           fi
           git remote remove gitee 2>/dev/null || true
           git remote add gitee "$URL"
