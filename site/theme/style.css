@@ -13,7 +13,8 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 16px/1.75 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* MiSans 优先（自托管子集见 site/fonts/，未提供则回退系统字体） */
+  font: 16px/1.75 "MiSans", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 a { color: var(--accent); text-decoration: none; }

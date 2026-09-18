@@ -2,3 +2,9 @@ dist/
 __pycache__/
 *.pyc
 .preview.log
+
+# 字体：源文件与压缩包不入库（体积大，可从官方重新获取）；只提交子集 site/fonts/subset/
+*.zip
+site/fonts/src/
+*.ttf
+*.otf

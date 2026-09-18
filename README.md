@@ -38,6 +38,7 @@ site/                     本站点本身
 │  ├─ weekly/<期>.sml     周报 / 月刊
 │  └─ contracts/*.sml     内容契约（字段即文档）
 ├─ theme/                 前端壳（index.html / app.js / style.css）
+│  └─ fonts/             可选：自托管字体（如 MiSans-*.ttf，构建期子集化，见 docs/FONTS.md）
 ├─ meta/repos.json        仓库元数据缓存
 └─ *.jpg                  群 logo（同时作为站点 favicon）
 

@@ -1,1 +1,15 @@
-{}
+{
+  "https://github.com/probe-rs/probe-rs": {
+    "host": "github",
+    "url": "https://github.com/probe-rs/probe-rs",
+    "stars": 2944,
+    "forks": 642,
+    "language": "Rust",
+    "license": "Apache-2.0",
+    "updated_at": "2026-09-17T06:44:05Z",
+    "description": "A debugging toolset and library for debugging embedded ARM and RISC-V targets on a separate host",
+    "archived": false,
+    "fetched_at": "2026-09-18T22:49:26+00:00",
+    "stale": false
+  }
+}

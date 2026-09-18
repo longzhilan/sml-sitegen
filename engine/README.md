@@ -18,6 +18,7 @@
 | `preview.py` | 本地静态服务（后台运行 + 日志） | 改端口/日志 |
 | `cli.py` | 命令行入口：`new/list/contracts/build/check/test/preview` | 加子命令 |
 | `test_contracts.py` | 契约引擎自测（19 项断言，钉住错误码语义） | 加断言 |
+| `fonts_import.py` | 从字体压缩包里挑权重到 `site/fonts/src/`（不整包解压） | 改权重匹配、加许可文件识别 |
 
 ## 目录约定（站点根目录，默认 `<repo>/site`）
 

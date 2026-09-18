@@ -54,6 +54,10 @@ if m["site"]["avatar"]:
     need((DIST / "favicon.jpg").exists() or (DIST / "favicon.png").exists()
          or (DIST / m["site"]["avatar"]).exists(), "favicon 文件缺失")
 need((DIST / "site.webmanifest").exists(), "缺少 site.webmanifest")
+if (DIST / "fonts.css").exists():
+    need('href="fonts.css"' in idx, "存在 fonts.css 但 index.html 没有引用它")
+    need(list((DIST / "fonts").glob("*.woff2")) + list((DIST / "fonts").glob("*.woff")),
+         "fonts.css 存在但没有字体子集文件（woff2 / woff）")
 
 for p in m["posts"]:
     need(p["tags"], "文章 %s 没有标签" % p["slug"])

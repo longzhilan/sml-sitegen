@@ -474,6 +474,14 @@ async function viewResources() {
       const row = el('div', 'card res');
       row.appendChild(link(r.url, r.title, 'card-title'));
       if (r.note) row.appendChild(el('p', 'muted', r.note));
+      const meta = el('div', 'meta');
+      if (r.meta) {
+        if (r.meta.stars != null) meta.appendChild(el('span', '', '★ ' + r.meta.stars));
+        if (r.meta.language) meta.appendChild(el('span', '', r.meta.language));
+        if (r.meta.updated_at) meta.appendChild(el('span', '', '更新 ' + String(r.meta.updated_at).slice(0, 10)));
+        if (r.meta.license) meta.appendChild(el('span', '', r.meta.license));
+      }
+      if (meta.childNodes.length) row.appendChild(meta);
       if (r.tags && r.tags.length) {
         const t = el('div', 'tags');
         r.tags.forEach(x => t.appendChild(el('span', 'tag', x)));

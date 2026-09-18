@@ -8,6 +8,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -414,7 +415,7 @@ def build_topics(rep):
     return out
 
 
-def build_simple(kind, rep):
+def build_simple(kind, rep, cache=None, offline=False):
     out = []
     for f in docs_in(CONTENT / kind):
         d, cs = load2(f)
@@ -428,11 +429,17 @@ def build_simple(kind, rep):
             "file": where,
         }
         if kind == "resources":
+            url = sml.as_str(d.get("url"))
+            kindv = sml.as_str(d.get("kind", "")).lower()
+            meta = None
+            if cache is not None and kindv in ("tool", "repo", "framework") and repo_meta.detect(url)[0]:
+                meta = cache.get(url, offline=offline)
             base.update({
                 "kind": sml.as_str(d.get("kind")),
-                "url": sml.as_str(d.get("url")),
+                "url": url,
                 "tags": [sml.as_str(x) for x in as_list(d.get("tags"))],
                 "note": sml.as_str(d.get("note", "")),
+                "meta": meta,
             })
         if kind == "weekly":
             ctx = render.Ctx()
@@ -501,8 +508,134 @@ def build_contract_page():
 MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
         ".webp": "image/webp", ".svg": "image/svg+xml", ".gif": "image/gif"}
 
+FONT_EXT = (".ttf", ".otf", ".woff2", ".woff")
+FONT_WEIGHT = {"thin": 100, "extralight": 200, "light": 300, "regular": 400, "normal": 400,
+               "book": 400, "medium": 500, "semibold": 600, "demibold": 600, "bold": 700,
+               "extrabold": 800, "black": 900, "heavy": 900}
 
-def inject_head(rep, out, manifest, avatar):
+
+def font_dirs():
+    """字体可以放 theme/fonts/ 或 site/fonts/。"""
+    return [d for d in (THEME / "fonts", ROOT / "fonts") if d.is_dir()]
+
+
+def site_text(manifest, bodies=()):
+    """站点里出现过的所有文字，用于字体子集化（宁可多收，不要漏字）。
+
+    注意：manifest 里**不含文章正文**（正文以 _ 前缀被过滤），前端 JS/CSS 里的中文也不在里面，
+    所以这里把正文渲染结果与 theme 源文件一起收进来，否则正文生僻字会回退到系统字体、段内字体混排。
+    """
+    parts = [json.dumps(manifest, ensure_ascii=False)]
+    parts += [b for b in bodies if b]
+    for f in sorted(THEME.glob("*")):
+        if f.suffix.lower() in (".js", ".css", ".html"):
+            parts.append(f.read_text(encoding="utf-8", errors="replace"))
+    return "".join(parts)
+
+
+def font_family_weight(stem):
+    low = stem.lower()
+    family = "MiSans" if "misans" in low else re.split(r"[-_.]", stem)[0]
+    weight = 400
+    tail = re.split(r"[-_]", low)[-1]
+    for key, val in FONT_WEIGHT.items():
+        if tail == key or key in low:
+            weight = val
+            break
+    return family, weight
+
+
+def build_fonts(rep, out, manifest, bodies=()):
+    """自托管字体：源字体 → 子集（woff2，缺 brotli 时退化为 woff）。
+
+    设计：子集产物（site/fonts/subset/）**提交进仓库**，CI 不需要装 fonttools；
+    本地放 `site/fonts/src/*.ttf` 时自动（重新）生成子集。字体许可文件随产物一起发布。
+    许可证提醒：MiSans 等可免费商用/网页嵌入，但不得单独售卖字体文件本身。
+    """
+    roots = [d for d in (ROOT / "fonts", THEME / "fonts") if d.is_dir()]
+    if not roots:
+        return ""
+    root = roots[0]
+    subset_dir = root / "subset"
+    srcs = [p for p in list(root.glob("*")) + list((root / "src").glob("*"))
+            if p.suffix.lower() in FONT_EXT]
+    existing = sorted(subset_dir.glob("*.woff2")) + sorted(subset_dir.glob("*.woff")) \
+        if subset_dir.is_dir() else []
+
+    made = []
+    if srcs:
+        try:
+            from fontTools import subset as ftsubset
+        except ImportError:
+            rep.warn("fonts", "有源字体但缺 fonttools，改用已有子集（如无则不加载自定义字体）。"
+                              "装法：pip install fonttools")
+        else:
+            flavor = "woff2"
+            try:
+                import brotli  # noqa: F401
+            except ImportError:
+                flavor = "woff"
+                rep.warn("fonts", "缺 brotli（woff2 压缩），子集改用 woff —— 浏览器同样支持")
+            text = site_text(manifest, bodies)
+            subset_dir.mkdir(parents=True, exist_ok=True)
+            stamp = subset_dir / ".stamp.json"
+            sig = hashlib.sha1(text.encode("utf-8")).hexdigest()
+            old_sig = ""
+            if stamp.exists():
+                try:
+                    old_sig = json.loads(stamp.read_text(encoding="utf-8")).get("sig", "")
+                except ValueError:
+                    old_sig = ""
+            fresh = sig == old_sig      # 站点文字没变、源字体也没更新时才复用现有子集
+            for f in srcs:
+                name = re.sub(r"[^a-z0-9]+", "-", f.stem.lower()).strip("-") + "." + flavor
+                dst = subset_dir / name
+                if fresh and dst.exists() and dst.stat().st_mtime >= f.stat().st_mtime:
+                    made.append(dst)
+                    continue
+                try:
+                    ftsubset.main([str(f), "--text=%s" % text, "--flavor=%s" % flavor,
+                                   "--output-file=%s" % dst, "--layout-features=*",
+                                   "--no-hinting", "--desubroutinize"])
+                except BaseException as e:  # noqa: BLE001
+                    rep.warn("fonts", "子集化失败 %s：%s" % (f.name, e))
+                    continue
+                if dst.exists():
+                    made.append(dst)
+                else:
+                    rep.warn("fonts", "子集化未产出文件：%s" % f.name)
+            if made and not fresh:
+                stamp.write_text(json.dumps({"sig": sig, "files": [p.name for p in made]},
+                                            ensure_ascii=False, indent=1), encoding="utf-8")
+
+    use = made or existing
+    if not use:
+        return ""
+
+    (out / "fonts").mkdir(parents=True, exist_ok=True)
+    for p in use:
+        shutil.copy2(p, out / "fonts" / p.name)
+    for lic in sorted(root.glob("LICENSE*")):
+        shutil.copy2(lic, out / "fonts" / lic.name)
+
+    faces = []
+    for p in use:
+        family, weight = font_family_weight(p.stem)
+        faces.append((family, weight, p.name, p.stat().st_size))
+    css = ["/* 由构建生成：字体子集（自托管，无第三方请求）。字体许可见 fonts/LICENSE-* */"]
+    for family, weight, name, _size in faces:
+        fmt = "woff2" if name.endswith(".woff2") else "woff"
+        css.append("@font-face{font-family:'%s';font-style:normal;font-weight:%d;"
+                   "font-display:swap;src:url('fonts/%s') format('%s')}"
+                   % (family, weight, name, fmt))
+    (out / "fonts.css").write_text("\n".join(css) + "\n", encoding="utf-8")
+    total = sum(x[3] for x in faces) / 1024
+    print("   字体子集 %d 个，共 %.0f KB（%s）"
+          % (len(faces), total, ", ".join(sorted({x[0] for x in faces}))))
+    return "fonts.css"
+
+
+def inject_head(rep, out, manifest, avatar, fonts_css=""):
     """把标题/描述/favicon（群 logo）注入静态壳，并生成 webmanifest。"""
     idx = out / "index.html"
     if not idx.exists():
@@ -522,6 +655,8 @@ def inject_head(rep, out, manifest, avatar):
              '<meta property="og:description" content="%s">' % render.esc(site.get("tagline", "")),
              '<meta property="og:type" content="website">',
              '<meta property="og:url" content="%s">' % render.esc(site["url"])]
+    if fonts_css:
+        lines.append('<link rel="stylesheet" href="%s">' % fonts_css)
     if icon:
         lines += ['<link rel="icon" href="%s">' % icon,
                   '<link rel="apple-touch-icon" href="%s">' % icon,
@@ -599,7 +734,7 @@ def main():
     topics = build_topics(rep)
     print("   %d 条" % len(topics))
     print("-- 资源 / 周报 / 文档页")
-    resources = build_simple("resources", rep)
+    resources = build_simple("resources", rep, cache, args.offline)
     weekly_raw = build_simple("weekly", rep)
     pages_raw = build_simple("pages", rep)
     weekly = [w[0] for w in weekly_raw]
@@ -905,7 +1040,9 @@ def main():
             if f.is_file():
                 shutil.copy2(f, out / f.name)
 
-    inject_head(rep, out, manifest, avatar)
+    bodies = [p["_html"] for p in posts] + [x.get("_html", "") for x in pages + weekly + topics]
+    fonts_css = build_fonts(rep, out, manifest, bodies)
+    inject_head(rep, out, manifest, avatar, fonts_css)
 
     cache.save()
 
