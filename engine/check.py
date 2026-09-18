@@ -51,6 +51,11 @@ if _self and m["site"].get("repo_url"):
     need(_self[0]["repo"].rstrip("/") == m["site"]["repo_url"].rstrip("/"),
          "项目 rec-blog 的 repo 与 site.repo_url 不一致（%s ≠ %s）"
          % (_self[0]["repo"], m["site"]["repo_url"]))
+_gen = [p for p in m["projects"] if p["id"] == "sml-sitegen"]
+if _gen and m["site"].get("repo_mirror"):
+    need(_gen[0]["repo"].rstrip("/") == m["site"]["repo_mirror"].rstrip("/"),
+         "项目 sml-sitegen 的 repo 与 site.repo_mirror 不一致（%s ≠ %s）"
+         % (_gen[0]["repo"], m["site"]["repo_mirror"]))
 
 idx = (DIST / "index.html").read_text(encoding="utf-8")
 need("<!--BUILD:HEAD-->" not in idx, "index.html 里的 <!--BUILD:HEAD--> 占位没被替换")

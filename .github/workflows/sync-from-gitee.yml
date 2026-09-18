@@ -64,3 +64,15 @@ jobs:
           git push origin master --force
           git push origin --tags --force
           echo "已同步：$(git rev-parse --short HEAD)"
+
+      - name: 同步到第二个源（可选）
+        env:
+          TOKEN: ${{ secrets.SNOWARE_GITEE_TOKEN }}
+          GITEE_USER: ${{ secrets.GITEE_USER }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "未配置 SNOWARE_GITEE_TOKEN，跳过第二个源（snoware/sml-sitegen）"
+            exit 0
+          fi
+          git push "https://${GITEE_USER}:${TOKEN}@gitee.com/snoware/sml-sitegen.git" master --force \
+            || echo "::warning::第二个源推送失败（不影响主流程）"

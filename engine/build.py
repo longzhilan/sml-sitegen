@@ -880,6 +880,7 @@ def main():
             "url": args.base_url or sml.as_str(site.get("url", "https://rec-blog.swebase.cn")),
             "domains": [sml.as_str(x) for x in as_list(site.get("domains"))],
             "repo_url": sml.as_str(site.get("repo_url", "")),
+            "repo_mirror": sml.as_str(site.get("repo_mirror", "")),
             "license": sml.as_str(site.get("default_license", "")),
             "announcement": sml.as_str(site.get("announcement", "")),
             "nav": [sml.as_str(x) for x in as_list(site.get("nav"))] or [
@@ -937,6 +938,7 @@ def main():
          "- 站点：%s" % base_url0,
          "- 仓库：%s（Gitee 是权威源；投稿走 PR，或交给群管理代投）"
          % (manifest["site"].get("repo_url") or "见站点首页"),
+         "- 第二个源（SML 应用示例）：%s" % manifest["site"].get("repo_mirror", ""),
          "- 默认许可：%s" % (manifest["site"]["license"] or "见文章内 license 字段"),
          "- RSS：%s/feed.xml" % base_url0,
          "- 全部正文纯文本：%s/llms-full.txt" % base_url0,

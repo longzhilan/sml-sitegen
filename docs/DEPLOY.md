@@ -47,6 +47,22 @@
 python engine/cli.py test && python engine/cli.py build && python engine/cli.py check
 ```
 
+## 0.5 两个源（同一份代码）
+
+| remote | 地址 | 角色 |
+|---|---|---|
+| `origin` | `https://gitee.com/rustembed/site.git` | **权威源**：所有改动先推这里 |
+| `sitegen` | `https://gitee.com/snoware/sml-sitegen.git` | 第二个源：同一份代码，作为 SML 的应用示例对外展示 |
+
+```bash
+git push origin master     # 必做（权威源）
+git push sitegen master    # 可选：让示例源跟上（同一个提交，不需要重新提交）
+```
+
+两个源内容一致，不需要分别维护；提交信息与历史也相同。若只推了一个，另一个只是暂时落后，补推即可。
+
+GitHub 侧仍是只读镜像 + 构建发布，与这两个 Gitee 源无关。
+
 ## 1. 仓库
 
 - 权威源：`https://gitee.com/rustembed/site`，**所有改动先推这里**（GitHub 只读镜像，不回写）。

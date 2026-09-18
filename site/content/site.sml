@@ -4,6 +4,8 @@ url: "https://rec-blog.swebase.cn"
 domains: [ "rec-blog.swebase.cn" "rust-embed.swebase.cn" ]
 # 仓库地址的唯一数据源：内容、文档、产物（llms.txt 等）都引用这里，避免多处各写一遍
 repo_url: "https://gitee.com/rustembed/site"
+# 第二个源：同一份代码的另一个发布点（作为 SML 应用示例）
+repo_mirror: "https://gitee.com/snoware/sml-sitegen"
 default_license: "CC BY-NC-SA 4.0"
 announcement: "投稿请提 PR，或把稿子交给有仓库权限的群管理代投。讨论回 QQ 群。"
 nav: [ library knowledge topics projects resources members weekly pages join ]

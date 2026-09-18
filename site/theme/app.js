@@ -820,6 +820,13 @@ async function render_() {
     repo.rel = 'noopener';
     f.appendChild(repo);
   }
+  if (m.site.repo_mirror) {
+    const mir = el('a', '', '示例源');
+    mir.href = m.site.repo_mirror;
+    mir.target = '_blank';
+    mir.rel = 'noopener';
+    f.appendChild(mir);
+  }
   if (m.site.license) f.appendChild(el('span', 'muted', '默认许可：' + m.site.license));
 }
 
